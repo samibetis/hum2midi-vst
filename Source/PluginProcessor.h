@@ -46,6 +46,10 @@ public:
     std::atomic<float> inputLevelDb { -100.0f };
     std::atomic<float> tuneCents { 0.0f };  // compensación de la afinación automática
 
+    // Un frame de análisis (cada 8 ms) para dibujar el pitch roll en la interfaz.
+    struct PitchFrame { float midi; short note; bool voiced; bool recording; };
+    int popPitchFrames (PitchFrame* dest, int maxFrames);  // solo desde el hilo de la UI
+
     // Grabación. Llamar solo desde el hilo de la UI.
     void startRecording();
     void stopRecording();
@@ -61,6 +65,7 @@ private:
     void emit (const hum::Detector::Event& e, int sampleOffset, juce::MidiBuffer& midi);
     void pushRecEvent (const RecEvent& e);
     void drainFifo();
+    void pushPitchFrame();
     void timerCallback() override { drainFifo(); }
 
     // --- DSP (solo hilo de audio)
@@ -81,6 +86,11 @@ private:
     juce::AbstractFifo fifo { 1024 };
     std::array<RecEvent, 1024> fifoData {};
     std::vector<RecEvent> take;            // solo hilo de la UI
+
+    // Cola sin bloqueos audio -> UI con el tono de cada frame (para el pitch roll).
+    juce::AbstractFifo pitchFifo { 2048 };
+    std::array<PitchFrame, 2048> pitchData {};
+    int lastFrameCount = 0;
     int recordedNoteCount = 0;
 
     // --- Parámetros (punteros a sus valores: lectura sin bloqueos desde el audio)

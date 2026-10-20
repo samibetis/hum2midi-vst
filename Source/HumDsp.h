@@ -498,6 +498,7 @@ public:
     float levelDb = -100.0f;         // nivel de entrada (para el medidor)
     float lastMidi = 0.0f;           // último tono detectado (con decimales), para la interfaz
     bool lastVoiced = false;
+    int frameCount = 0;              // sube en cada análisis (cada 8 ms)
 
     void prepare (double sampleRate)
     {
@@ -572,6 +573,7 @@ private:
 
         lastVoiced = voiced;
         if (voiced) lastMidi = midi;
+        ++frameCount;
 
         NoteEvent ev[2];
         const int c = tracker.update (voiced, midi, levelDb, dbToVelocity (levelDb - gateDb), ev);

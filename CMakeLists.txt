@@ -26,6 +26,12 @@ juce_add_plugin(Hum2Midi
     MICROPHONE_PERMISSION_TEXT "hum2midi necesita el micro para escuchar lo que tarareas."
     VST3_CATEGORIES Fx Analyzer)
 
+# Tipografía Barlow (SIL Open Font License, ver Assets/OFL-Barlow.txt) incrustada en el plugin.
+juce_add_binary_data(HumAssets SOURCES
+    Assets/Barlow-Medium.ttf
+    Assets/Barlow-SemiBold.ttf
+    Assets/BarlowSemiCondensed-SemiBold.ttf)
+
 target_sources(Hum2Midi PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
@@ -41,6 +47,7 @@ target_compile_options(Hum2Midi PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 target_link_libraries(Hum2Midi
     PRIVATE
+        HumAssets
         juce::juce_audio_utils
     PUBLIC
         juce::juce_recommended_config_flags

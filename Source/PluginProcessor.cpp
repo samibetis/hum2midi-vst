@@ -109,6 +109,11 @@ void HumAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         const int n = detector.push (s, events);
         for (int k = 0; k < n; ++k)
             emit (events[k], i, midi);
+        if (detector.frameCount != lastFrameCount)
+        {
+            lastFrameCount = detector.frameCount;
+            pushPitchFrame();
+        }
 
         // 3. La salida es el synth interno (o silencio). Tu voz no pasa: solo oyes la nota detectada.
         const float synthSample = synth.next();
@@ -175,6 +180,24 @@ void HumAudioProcessor::pushRecEvent (const RecEvent& e)
     if (scope.blockSize1 > 0)      fifoData[(size_t) scope.startIndex1] = e;
     else if (scope.blockSize2 > 0) fifoData[(size_t) scope.startIndex2] = e;
     // si la cola estuviese llena, el evento se pierde (con 1024 huecos y 20 vaciados/s no pasa)
+}
+
+void HumAudioProcessor::pushPitchFrame()
+{
+    const auto& tr = detector.tracker;
+    const PitchFrame f { detector.lastMidi + 12.0f * (float) tr.octave - tr.tuneOffset(), (short) tr.current,
+                         detector.lastVoiced, recState.load() == Recording };
+    const auto scope = pitchFifo.write (1);
+    if (scope.blockSize1 > 0)      pitchData[(size_t) scope.startIndex1] = f;
+    else if (scope.blockSize2 > 0) pitchData[(size_t) scope.startIndex2] = f;
+}
+
+int HumAudioProcessor::popPitchFrames (PitchFrame* dest, int maxFrames)
+{
+    const int num = juce::jmin (maxFrames, pitchFifo.getNumReady());
+    int k = 0;
+    pitchFifo.read (num).forEach ([&] (int index) { dest[k++] = pitchData[(size_t) index]; });
+    return num;
 }
 
 void HumAudioProcessor::drainFifo()
