@@ -44,6 +44,7 @@ public:
     // Estado para la interfaz (se escribe en el hilo de audio, se lee en el de la UI).
     std::atomic<int>   currentNote  { -1 };
     std::atomic<float> inputLevelDb { -100.0f };
+    std::atomic<float> tuneCents { 0.0f };  // compensación de la afinación automática
 
     // Grabación. Llamar solo desde el hilo de la UI.
     void startRecording();
@@ -53,24 +54,18 @@ public:
     juce::File writeTakeToMidiFile (bool quantize);  // devuelve {} si no hay nada grabado
 
 private:
-    struct RecEvent { bool on; int note; int velocity; juce::int64 samplePos; };
+    struct RecEvent { bool on; int note; int velocity; juce::int64 samplePos; bool replace; };
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void handleRecordState();
-    void analyseHop (int sampleOffset, juce::MidiBuffer& midi);
-    void emit (const hum::NoteEvent& e, int sampleOffset, juce::MidiBuffer& midi);
+    void emit (const hum::Detector::Event& e, int sampleOffset, juce::MidiBuffer& midi);
     void pushRecEvent (const RecEvent& e);
     void drainFifo();
     void timerCallback() override { drainFifo(); }
 
     // --- DSP (solo hilo de audio)
-    hum::Yin yin;
-    hum::NoteTracker tracker;
+    hum::Detector detector;
     hum::MonoSynth synth;
-    std::vector<float> window, hopBuffer;  // ventana deslizante y bloque que se va llenando
-    int hopSize = 1024, hopFill = 0;
-    double hopSumSq = 0.0;
-    float gateLinear = 0.01f;
     double sr = 44100.0;
     juce::int64 sampleClock = 0;           // muestras procesadas desde que arrancó
 
@@ -95,6 +90,7 @@ private:
     std::atomic<float>* pScale = nullptr;
     std::atomic<float>* pSynth = nullptr;
     std::atomic<float>* pSynthVol = nullptr;
+    std::atomic<float>* pAutoTune = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HumAudioProcessor)
 };

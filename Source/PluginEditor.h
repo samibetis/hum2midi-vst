@@ -49,7 +49,8 @@ private:
     juce::Slider gateSlider, octaveSlider, volSlider;
     juce::Label gateLabel, octaveLabel, volLabel, rootLabel, scaleLabel;
     juce::ComboBox rootBox, scaleBox;
-    juce::ToggleButton synthToggle { "Oir synth" }, quantizeToggle;
+    juce::ToggleButton synthToggle { "Oir synth" }, quantizeToggle, autoTuneToggle;
+    juce::Label tuneLabel;
     juce::TextButton recButton;
     MidiDragArea dragArea;
 
@@ -60,7 +61,7 @@ private:
     using ButtonAtt = juce::AudioProcessorValueTreeState::ButtonAttachment;
     std::unique_ptr<SliderAtt> gateAtt, octaveAtt, volAtt;
     std::unique_ptr<ComboAtt>  rootAtt, scaleAtt;
-    std::unique_ptr<ButtonAtt> synthAtt;
+    std::unique_ptr<ButtonAtt> synthAtt, autoTuneAtt;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HumAudioProcessorEditor)
 };

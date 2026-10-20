@@ -20,6 +20,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout HumAudioProcessor::createLay
         std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "root", 1 }, juce::String::fromUTF8 ("Tónica"), kNoteNames, 0),
         std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "scale", 1 }, "Escala", scaleNames, 0),
         std::make_unique<juce::AudioParameterBool>   (juce::ParameterID { "synth", 1 }, "Synth", true),
+        std::make_unique<juce::AudioParameterBool>   (juce::ParameterID { "autotune", 1 }, juce::String::fromUTF8 ("Afinación auto"), true),
         std::make_unique<juce::AudioParameterFloat>  (juce::ParameterID { "synthVol", 1 }, "Volumen",
             juce::NormalisableRange<float> (0.0f, 1.0f), 0.5f,
             juce::AudioParameterFloatAttributes().withStringFromValueFunction (
@@ -39,6 +40,7 @@ HumAudioProcessor::HumAudioProcessor()
     pScale    = apvts.getRawParameterValue ("scale");
     pSynth    = apvts.getRawParameterValue ("synth");
     pSynthVol = apvts.getRawParameterValue ("synthVol");
+    pAutoTune = apvts.getRawParameterValue ("autotune");
     startTimerHz (20);  // vacía la cola de grabación aunque la ventana del plugin esté cerrada
 }
 
@@ -58,15 +60,8 @@ bool HumAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) cons
 void HumAudioProcessor::prepareToPlay (double sampleRate, int)
 {
     sr = sampleRate;
-    const int win = sampleRate > 50000.0 ? 4096 : 2048;  // ~46 ms de ventana sea cual sea el sample rate
-    hopSize = win / 2;                                     // analizamos cada ~23 ms
-    window.assign ((size_t) win, 0.0f);
-    hopBuffer.assign ((size_t) hopSize, 0.0f);
-    hopFill = 0;
-    hopSumSq = 0.0;
-    yin.prepare (sampleRate, win);
+    detector.prepare (sampleRate);
     synth.prepare (sampleRate);
-    tracker.reset();
     currentNote = -1;
 }
 
@@ -83,9 +78,11 @@ void HumAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 hostBpm = *bpm;
 
     // Parámetros: se leen una vez por bloque.
-    gateLinear = juce::Decibels::decibelsToGain (pGate->load());
-    tracker.octave = (int) pOctave->load();
-    tracker.root   = (int) pRoot->load();
+    auto& tracker = detector.tracker;
+    detector.gateDb  = pGate->load();
+    tracker.octave   = (int) pOctave->load();
+    tracker.root     = (int) pRoot->load();
+    tracker.autoTune = pAutoTune->load() > 0.5f;
     const auto& scale = hum::kScales[juce::jlimit (0, hum::kNumScales - 1, (int) pScale->load())];
     tracker.steps     = scale.steps;
     tracker.stepCount = scale.count;
@@ -107,11 +104,11 @@ void HumAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (numIn > 0)
             s /= (float) numIn;
 
-        // 2. Llenamos el bloque de análisis; cuando está lleno, analizamos.
-        hopBuffer[(size_t) hopFill++] = s;
-        hopSumSq += (double) s * s;
-        if (hopFill == hopSize)
-            analyseHop (i, midi);
+        // 2. Al detector (filtra, analiza cada 8 ms y decide notas).
+        hum::Detector::Event events[2];
+        const int n = detector.push (s, events);
+        for (int k = 0; k < n; ++k)
+            emit (events[k], i, midi);
 
         // 3. La salida es el synth interno (o silencio). Tu voz no pasa: solo oyes la nota detectada.
         const float synthSample = synth.next();
@@ -120,42 +117,16 @@ void HumAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             buffer.setSample (ch, i, out);
     }
 
+    currentNote  = tracker.current;
+    inputLevelDb = detector.levelDb;
+    tuneCents    = tracker.tuneOffset() * 100.0f;
+
     sampleClock += numSamples;
     if (recState.load() == Recording)
         recordedLength = sampleClock - recordStart;
 }
 
-void HumAudioProcessor::analyseHop (int sampleOffset, juce::MidiBuffer& midi)
-{
-    const float rms = (float) std::sqrt (hopSumSq / hopSize);
-    hopSumSq = 0.0;
-    hopFill = 0;
-
-    // Desplazamos la ventana y metemos el bloque nuevo al final.
-    std::copy (window.begin() + hopSize, window.end(), window.begin());
-    std::copy (hopBuffer.begin(), hopBuffer.end(), window.end() - hopSize);
-
-    inputLevelDb = juce::Decibels::gainToDecibels (rms, -100.0f);
-
-    // Puerta de volumen -> YIN -> nota MIDI (con decimales).
-    bool voiced = false;
-    float midiNote = 0.0f;
-    if (rms >= gateLinear)
-    {
-        const float hz = yin.detect (window.data());
-        if (hz > 0.0f) { midiNote = hum::hzToMidi (hz); voiced = true; }
-    }
-
-    // Segmentación -> eventos.
-    hum::NoteEvent events[2];
-    const int n = tracker.update (midiNote, voiced, hum::rmsToVelocity (rms, gateLinear), events);
-    for (int k = 0; k < n; ++k)
-        emit (events[k], sampleOffset, midi);
-
-    currentNote = tracker.current;
-}
-
-void HumAudioProcessor::emit (const hum::NoteEvent& e, int sampleOffset, juce::MidiBuffer& midi)
+void HumAudioProcessor::emit (const hum::Detector::Event& e, int sampleOffset, juce::MidiBuffer& midi)
 {
     if (e.on)
     {
@@ -170,12 +141,10 @@ void HumAudioProcessor::emit (const hum::NoteEvent& e, int sampleOffset, juce::M
 
     if (recState.load() == Recording)
     {
-        // La nota se confirma `stable` bloques después de empezar a cantarla (y se corta
-        // `release` bloques después de parar), y la ventana de YIN mira un bloque hacia atrás.
-        // Restamos ese retraso para que la toma caiga donde la cantaste, no donde se detectó.
-        const juce::int64 latency = (juce::int64) ((e.on ? tracker.stable : tracker.release) + 1) * hopSize;
-        const juce::int64 pos = sampleClock + sampleOffset - recordStart - latency;
-        pushRecEvent ({ e.on, e.note, e.velocity, juce::jmax ((juce::int64) 0, pos) });
+        // El MIDI en vivo sale cuando la nota se confirma (~40-60 ms tarde), pero el detector
+        // nos dice cuándo ocurrió de verdad (samplesAgo): la toma cae donde la cantaste.
+        const juce::int64 pos = sampleClock + sampleOffset - recordStart - e.samplesAgo;
+        pushRecEvent ({ e.on, e.note, e.velocity, juce::jmax ((juce::int64) 0, pos), e.replace });
     }
 }
 
@@ -189,14 +158,14 @@ void HumAudioProcessor::handleRecordState()
     {
         recordStart = sampleClock;
         recordedLength = 0;
-        if (tracker.current >= 0)  // ya estabas cantando una nota al darle a grabar
-            pushRecEvent ({ true, tracker.current, 100, 0 });
+        if (detector.tracker.current >= 0)  // ya estabas cantando una nota al darle a grabar
+            pushRecEvent ({ true, detector.tracker.current, 100, 0, false });
     }
     else if (state == StopRequested && recState.compare_exchange_strong (state, Idle))
     {
         recordedLength = sampleClock - recordStart;
-        if (tracker.current >= 0)
-            pushRecEvent ({ false, tracker.current, 0, recordedLength.load() });
+        if (detector.tracker.current >= 0)
+            pushRecEvent ({ false, detector.tracker.current, 0, recordedLength.load(), false });
     }
 }
 
@@ -218,7 +187,7 @@ void HumAudioProcessor::drainFifo()
     {
         const auto& e = fifoData[(size_t) index];
         take.push_back (e);
-        if (e.on) ++recordedNoteCount;
+        if (e.on && ! e.replace) ++recordedNoteCount;
     });
 }
 
@@ -263,7 +232,16 @@ juce::File HumAudioProcessor::writeTakeToMidiFile (bool quantize)
     for (const auto& e : take)
     {
         const double t = toTicks (e.samplePos);
-        if (e.on)
+        if (e.on && e.replace && openNote < 0 && ! notes.empty())
+        {
+            // El detector corrigió la nota anterior (scoop, paso de glissando...): se borra
+            // y la buena ocupa su lugar desde su inicio.
+            openStart = notes.back().start;
+            openVel   = notes.back().velocity;
+            openNote  = e.note;
+            notes.pop_back();
+        }
+        else if (e.on)
         {
             if (openNote >= 0) notes.push_back ({ openNote, openVel, openStart, t });
             openNote = e.note; openVel = e.velocity; openStart = t;

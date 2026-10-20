@@ -111,6 +111,12 @@ HumAudioProcessorEditor::HumAudioProcessorEditor (HumAudioProcessor& p)
     synthAtt = std::make_unique<ButtonAtt> (proc.apvts, "synth", synthToggle);
     addAndMakeVisible (synthToggle);
 
+    autoTuneToggle.setButtonText (u8 ("Afinación auto"));
+    autoTuneAtt = std::make_unique<ButtonAtt> (proc.apvts, "autotune", autoTuneToggle);
+    addAndMakeVisible (autoTuneToggle);
+    tuneLabel.setColour (juce::Label::textColourId, kDim);
+    addAndMakeVisible (tuneLabel);
+
     quantizeToggle.setButtonText ("Cuantizar a 1/16");
     quantizeToggle.setToggleState (true, juce::dontSendNotification);
     addAndMakeVisible (quantizeToggle);
@@ -125,7 +131,7 @@ HumAudioProcessorEditor::HumAudioProcessorEditor (HumAudioProcessor& p)
     dragArea.createFile = [this] { return proc.writeTakeToMidiFile (quantizeToggle.getToggleState()); };
     addAndMakeVisible (dragArea);
 
-    setSize (460, 400);
+    setSize (460, 432);
     timerCallback();
     startTimerHz (30);
 }
@@ -164,6 +170,15 @@ void HumAudioProcessorEditor::timerCallback()
     const int note = proc.currentNote.load();
     noteLabel.setText (note >= 0 ? noteName (note) : u8 ("—"), juce::dontSendNotification);
     noteLabel.setColour (juce::Label::textColourId, note >= 0 ? kAccent : kDim);
+
+    // Cuánto te está compensando la afinación automática (p. ej. "cantas 38 ¢ bajo").
+    const int cents = juce::roundToInt (proc.tuneCents.load());
+    juce::String tuneText;
+    if (! autoTuneToggle.getToggleState()) tuneText = "";
+    else if (std::abs (cents) < 5)         tuneText = u8 ("cantas afinado");
+    else                                   tuneText = u8 ("cantas ") + juce::String (std::abs (cents)) + u8 (" ¢ ")
+                                                      + (cents < 0 ? "bajo" : "alto");
+    tuneLabel.setText (tuneText, juce::dontSendNotification);
 
     meter.levelDb = proc.inputLevelDb.load();
     meter.gateDb  = (float) gateSlider.getValue();
@@ -218,6 +233,11 @@ void HumAudioProcessorEditor::resized()
     synthToggle.setBounds (synthRow.removeFromLeft (110));
     volLabel.setBounds (synthRow.removeFromLeft (64));
     volSlider.setBounds (synthRow);
+    r.removeFromTop (6);
+
+    auto tuneRow = r.removeFromTop (26);
+    autoTuneToggle.setBounds (tuneRow.removeFromLeft (150));
+    tuneLabel.setBounds (tuneRow);
     r.removeFromTop (14);
 
     auto bottom = r;
