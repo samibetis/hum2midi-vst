@@ -1,0 +1,28 @@
+# Compila el plugin en una máquina Windows de GitHub cada vez que subes cambios.
+# El resultado (.vst3 + .exe standalone) aparece en la pestaña Actions -> último run -> Artifacts.
+name: Build Windows
+
+on:
+  push:
+  workflow_dispatch:   # botón "Run workflow" para lanzarlo a mano
+
+jobs:
+  windows:
+    runs-on: windows-latest   # ya trae Visual Studio y CMake instalados
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar (descarga JUCE)
+        run: cmake -B build
+
+      - name: Compilar
+        run: cmake --build build --config Release --parallel
+
+      - name: Subir el plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: hum2midi-windows
+          path: |
+            build/Hum2Midi_artefacts/Release/VST3/
+            build/Hum2Midi_artefacts/Release/Standalone/hum2midi.exe
+          if-no-files-found: error
