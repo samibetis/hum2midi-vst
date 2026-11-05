@@ -228,12 +228,10 @@ public:
     // windowFrames: cuántos frames ocupa la ventana de análisis (lo que "arrastra" el pasado)
     void configure (double frameRate, int windowFrames)
     {
+        fps = frameRate;
         const auto frames = [frameRate] (double ms) { return std::max (1, (int) std::lround (ms * 0.001 * frameRate)); };
-        onsetFrames   = std::min (frames (40), kHist / 2);
-        changeFrames  = std::min (frames (48), kHist / 2);
-        releaseFrames = frames (56);
+        applyDetail();
         scoopFrames   = frames (160);
-        correctFrames = frames (100);
         reviewFrames  = frames (300);
         reviewMinFrames = frames (48);
         dipMaxFrames  = frames (250);
@@ -241,6 +239,17 @@ public:
         peakLeakDb    = (float) (10.0 / frameRate);  // el pico de referencia baja 10 dB/s
         tuneAlpha     = (float) (1.0 / (1.5 * frameRate));  // se adapta en ~1.5 s de notas estables
     }
+
+    // Detalle: 1 = lo capta todo (adornos, notas de paso, temblores); 0 = solo la melodía
+    // principal. Con menos detalle una nota tiene que durar más y desviarse más para contar.
+    void setDetail (float d)
+    {
+        d = std::clamp (d, 0.0f, 1.0f);
+        if (std::abs (d - detail) < 0.001f) return;
+        detail = d;
+        applyDetail();
+    }
+    float getDetail() const { return detail; }
 
     void reset()
     {
@@ -453,6 +462,19 @@ private:
     }
     const HistEntry& hist (int age) const { return histBuf[(histPos - 1 - age + 2 * kHist) % kHist]; }  // 0 = el más nuevo
 
+    void applyDetail()
+    {
+        const double s = 1.0 - detail;  // 0 = fino, 1 = suave
+        const auto frames = [this] (double ms) { return std::max (1, (int) std::lround (ms * 0.001 * fps)); };
+        // Solo cambia el TIEMPO: cuánto tiene que durar algo para ser nota. La tolerancia de tono
+        // y los re-ataques no se tocan, o se perderían pasos de semitono y notas repetidas reales.
+        onsetFrames   = std::min (frames (40 + 40 * s), kHist / 2);   // 40 -> 80 ms para empezar una nota
+        changeFrames  = std::min (frames (48 + 90 * s), kHist / 2);   // 48 -> 138 ms para cambiar de nota
+        releaseFrames = frames (56 + 30 * s);                          // huecos algo más largos no cortan
+        correctFrames = frames (100 + 80 * s);
+        hysteresis = (float) (0.5 + 0.1 * s);
+    }
+
     bool belongsToCurrent (float m) const
     {
         const float dCur = std::abs (m - (float) current);
@@ -462,8 +484,11 @@ private:
         return note == current || dCur - std::abs (m - (float) note) < hysteresis;
     }
 
-    static constexpr float tolerance = 0.7f, hysteresis = 0.5f, maxSpread = 1.1f, maxTrend = 0.55f, maxOnsetTrend = 0.3f;
-    static constexpr float dipDb = 9.0f, riseDb = 6.0f;
+    static constexpr float maxSpread = 1.1f, maxTrend = 0.55f, maxOnsetTrend = 0.3f;
+    static constexpr float tolerance = 0.7f, dipDb = 9.0f, riseDb = 6.0f;
+    float hysteresis = 0.5f;
+    float detail = 1.0f;
+    double fps = 125.0;
     static constexpr int medianLag = 2;
 
     int onsetFrames = 5, changeFrames = 6, releaseFrames = 7, scoopFrames = 20, dipMaxFrames = 31, settleFrames = 3, correctFrames = 12, reviewFrames = 37, reviewMinFrames = 10;
@@ -483,6 +508,40 @@ private:
     float notePeakDb = -100.0f, dipMinDb = 0.0f;
     int dipFrame = 0, dipStart = 0;
 };
+
+// ---------------------------------------------------------------- Simplificar la toma
+// Al exportar: una nota más corta que minLen se funde con la vecina con la que está pegada
+// (la anterior si la hay; si no, la siguiente). Si está aislada entre silencios, se quita.
+struct TakeNote { int note, velocity; double start, end; };
+
+inline void mergeShortNotes (std::vector<TakeNote>& notes, double minLen, double touch)
+{
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (size_t i = 0; i < notes.size(); ++i)
+        {
+            if (notes[i].end - notes[i].start >= minLen) continue;
+            const bool prevTouch = i > 0 && notes[i].start - notes[i - 1].end <= touch;
+            const bool nextTouch = i + 1 < notes.size() && notes[i + 1].start - notes[i].end <= touch;
+            if (prevTouch && nextTouch && notes[i + 1].note == notes[i - 1].note)
+            {
+                // 60 -> 61 (cortita) -> 60: era un adorno o un temblor, todo es un único 60.
+                notes[i - 1].end = notes[i + 1].end;
+                notes.erase (notes.begin() + (long) i, notes.begin() + (long) i + 2);
+            }
+            else
+            {
+                if (prevTouch)      notes[i - 1].end = notes[i].end;
+                else if (nextTouch) notes[i + 1].start = notes[i].start;
+                notes.erase (notes.begin() + (long) i);
+            }
+            changed = true;
+            break;
+        }
+    }
+}
 
 // ---------------------------------------------------------------- Detector completo
 // Se le pasa el audio muestra a muestra. Devuelve eventos con `samplesAgo`: cuántas muestras

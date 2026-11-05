@@ -17,6 +17,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout HumAudioProcessor::createLay
             juce::AudioParameterFloatAttributes().withStringFromValueFunction (
                 [] (float v, int) { return juce::String (v, 1) + " dB"; })),
         std::make_unique<juce::AudioParameterInt>    (juce::ParameterID { "octave", 1 }, "Octava", -2, 2, 0),
+        // Detalle: 100 % lo capta todo (adornos, temblores); menos = solo la melodía principal.
+        std::make_unique<juce::AudioParameterFloat>  (juce::ParameterID { "detail", 1 }, "Detalle",
+            juce::NormalisableRange<float> (0.0f, 1.0f), 0.8f,
+            juce::AudioParameterFloatAttributes().withStringFromValueFunction (
+                [] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + " %"; })),
         std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "root", 1 }, juce::String::fromUTF8 ("Tónica"), kNoteNames, 0),
         std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "scale", 1 }, "Escala", scaleNames, 0),
         std::make_unique<juce::AudioParameterBool>   (juce::ParameterID { "synth", 1 }, "Synth", true),
@@ -41,6 +46,7 @@ HumAudioProcessor::HumAudioProcessor()
     pSynth    = apvts.getRawParameterValue ("synth");
     pSynthVol = apvts.getRawParameterValue ("synthVol");
     pAutoTune = apvts.getRawParameterValue ("autotune");
+    pDetail   = apvts.getRawParameterValue ("detail");
     startTimerHz (20);  // vacía la cola de grabación aunque la ventana del plugin esté cerrada
 }
 
@@ -83,6 +89,7 @@ void HumAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     tracker.octave   = (int) pOctave->load();
     tracker.root     = (int) pRoot->load();
     tracker.autoTune = pAutoTune->load() > 0.5f;
+    tracker.setDetail (pDetail->load());
     const auto& scale = hum::kScales[juce::jlimit (0, hum::kNumScales - 1, (int) pScale->load())];
     tracker.steps     = scale.steps;
     tracker.stepCount = scale.count;
@@ -247,7 +254,7 @@ juce::File HumAudioProcessor::writeTakeToMidiFile (bool quantize)
     const double bpm = hostBpm.load();
     const auto toTicks = [&] (juce::int64 samples) { return (double) samples / sr * bpm / 60.0 * ppq; };
 
-    struct Note { int note, velocity; double start, end; };
+    using Note = hum::TakeNote;
     std::vector<Note> notes;
     int openNote = -1, openVel = 0;
     double openStart = 0.0;
@@ -277,6 +284,15 @@ juce::File HumAudioProcessor::writeTakeToMidiFile (bool quantize)
     }
     if (openNote >= 0)  // nota que seguía sonando al parar
         notes.push_back ({ openNote, openVel, openStart, toTicks (recordedLength.load()) });
+
+    // 1b. Menos detalle = las notas muy cortas (adornos, temblores) se funden con su vecina.
+    //     A 100 % no se toca nada; a 0 % una nota necesita ~150 ms para quedarse.
+    const double detail = pDetail->load();
+    if (detail < 0.999)
+    {
+        const auto msToTicks = [&] (double ms) { return toTicks ((juce::int64) (ms * 0.001 * sr)); };
+        hum::mergeShortNotes (notes, msToTicks (40.0 + 110.0 * (1.0 - detail)), msToTicks (15.0));
+    }
 
     // 2. Cuantización opcional a semicorcheas (1/16 = un cuarto de negra).
     if (quantize)

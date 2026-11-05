@@ -357,6 +357,8 @@ HumAudioProcessorEditor::HumAudioProcessorEditor (HumAudioProcessor& p)
 
     setupKnob (gateKnob, gateLabel, "Puerta", "gate", false);
     setupKnob (octaveKnob, octaveLabel, "Octava", "octave", true);
+    setupKnob (detailKnob, detailLabel, "Detalle", "detail", false);
+    detailKnob.setTooltip (u8 ("Al 100 % capta adornos y temblores; más bajo se queda con la melodía principal"));
     setupKnob (volKnob, volLabel, "Volumen", "synthVol", false);
     setupCombo (rootBox, rootLabel, u8 ("Tónica"), "root");
     setupCombo (scaleBox, scaleLabel, "Escala", "scale");
@@ -372,7 +374,7 @@ HumAudioProcessorEditor::HumAudioProcessorEditor (HumAudioProcessor& p)
     synthAtt = std::make_unique<ButtonAtt> (proc.apvts, "synth", synthToggle);
     addAndMakeVisible (synthToggle);
 
-    setSize (800, 464);
+    setSize (880, 464);
     timerCallback();
     startTimerHz (60);
 }
@@ -397,6 +399,7 @@ void HumAudioProcessorEditor::setupKnob (juce::Slider& s, juce::Label& l, const 
         s.setDoubleClickReturnValue (true, param->convertFrom0to1 (param->getDefaultValue()));
     if (paramId == "gate") gateAtt = std::move (att);
     else if (paramId == "octave") octaveAtt = std::move (att);
+    else if (paramId == "detail") detailAtt = std::move (att);
     else volAtt = std::move (att);
 
     l.setText (name, juce::dontSendNotification);
@@ -526,8 +529,9 @@ void HumAudioProcessorEditor::resized()
     dividers.clear();
     auto c = controlsArea;
 
-    auto detect = c.removeFromLeft (190);
-    placeKnob (gateKnob, gateLabel, detect.removeFromLeft (95));
+    auto detect = c.removeFromLeft (276);
+    placeKnob (gateKnob, gateLabel, detect.removeFromLeft (92));
+    placeKnob (detailKnob, detailLabel, detect.removeFromLeft (92));
     placeKnob (octaveKnob, octaveLabel, detect);
     dividers.push_back (c.getX() + 16);
     c.removeFromLeft (32);

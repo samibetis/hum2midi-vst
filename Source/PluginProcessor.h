@@ -101,6 +101,7 @@ private:
     std::atomic<float>* pSynth = nullptr;
     std::atomic<float>* pSynthVol = nullptr;
     std::atomic<float>* pAutoTune = nullptr;
+    std::atomic<float>* pDetail = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HumAudioProcessor)
 };

@@ -47,6 +47,9 @@ public:
         setColour (juce::PopupMenu::textColourId, col::text);
         setColour (juce::PopupMenu::highlightedBackgroundColourId, col::line);
         setColour (juce::PopupMenu::highlightedTextColourId, col::text);
+        setColour (juce::TooltipWindow::backgroundColourId, col::raised);
+        setColour (juce::TooltipWindow::textColourId, col::text);
+        setColour (juce::TooltipWindow::outlineColourId, col::line);
     }
 
     juce::Font font (float h) const    { return juce::Font (juce::FontOptions().withTypeface (medium).withHeight (h)); }

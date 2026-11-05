@@ -103,9 +103,10 @@ private:
     TakeChip takeChip { lnf };
     juce::ToggleButton quantizeToggle, autoTuneToggle, synthToggle;
     juce::Label tuneLabel;
+    juce::TooltipWindow tooltips { this, 700 };  // explica los controles al pasar el ratón
 
-    juce::Slider gateKnob, octaveKnob, volKnob;
-    juce::Label gateLabel, octaveLabel, volLabel, rootLabel, scaleLabel;
+    juce::Slider gateKnob, octaveKnob, detailKnob, volKnob;
+    juce::Label gateLabel, octaveLabel, detailLabel, volLabel, rootLabel, scaleLabel;
     juce::ComboBox rootBox, scaleBox;
 
     // Las "attachments" enlazan cada control con su parámetro: mueves el control y cambia el
@@ -113,7 +114,7 @@ private:
     using SliderAtt = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ComboAtt  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using ButtonAtt = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    std::unique_ptr<SliderAtt> gateAtt, octaveAtt, volAtt;
+    std::unique_ptr<SliderAtt> gateAtt, octaveAtt, detailAtt, volAtt;
     std::unique_ptr<ComboAtt>  rootAtt, scaleAtt;
     std::unique_ptr<ButtonAtt> synthAtt, autoTuneAtt;
 
