@@ -11,6 +11,7 @@
 //         -> eventos con su instante real (para que la grabación caiga donde cantaste)
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -650,38 +651,202 @@ private:
     double hopSumSq = 0.0, prevHopSumSq = 0.0;
 };
 
+// ---------------------------------------------------------------- Teoría musical
+// Detección de tonalidad (Krumhansl-Kessler): compara cuánto tiempo suena cada nota
+// (do, do#, re...) con el "perfil" típico de cada tonalidad mayor y menor.
+struct KeyResult { int root = 0; bool minor = false; float score = 0.0f, margin = 0.0f; bool valid = false; };
+
+inline KeyResult detectKey (const float pitchClassWeight[12])
+{
+    static constexpr float major[12] = { 6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f };
+    static constexpr float minor[12] = { 6.33f, 2.68f, 3.52f, 5.38f, 2.60f, 3.53f, 2.54f, 4.75f, 3.98f, 2.69f, 3.34f, 3.17f };
+
+    float total = 0.0f;
+    int distinct = 0;
+    for (int i = 0; i < 12; ++i) { total += pitchClassWeight[i]; distinct += pitchClassWeight[i] > 0.0f; }
+    KeyResult best;
+    if (total <= 0.0f || distinct < 3)
+        return best;  // con menos de 3 notas distintas no hay forma de saberlo
+
+    const auto corr = [&] (const float* profile, int root)
+    {
+        float mx = 0.0f, my = 0.0f;
+        for (int i = 0; i < 12; ++i) { mx += pitchClassWeight[(i + root) % 12]; my += profile[i]; }
+        mx /= 12.0f; my /= 12.0f;
+        float sxy = 0.0f, sxx = 0.0f, syy = 0.0f;
+        for (int i = 0; i < 12; ++i)
+        {
+            const float dx = pitchClassWeight[(i + root) % 12] - mx, dy = profile[i] - my;
+            sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+        }
+        return sxx > 0.0f ? sxy / std::sqrt (sxx * syy) : 0.0f;
+    };
+
+    // Además del perfil: ¿cuánto de lo cantado cabe en la escala? Una sola nota fuera (p. ej.
+    // un fa natural en Mi menor) delata a la candidata equivocada cuando el perfil duda.
+    static constexpr int majorSet[] = { 0, 2, 4, 5, 7, 9, 11 };
+    static constexpr int minorSet[] = { 0, 2, 3, 5, 7, 8, 10, 11 };  // natural + 7ª armónica
+    const auto fit = [&] (bool isMinor, int root)
+    {
+        float in = 0.0f;
+        const int* set = isMinor ? minorSet : majorSet;
+        const int n = isMinor ? 8 : 7;
+        for (int i = 0; i < n; ++i) in += pitchClassWeight[(root + set[i]) % 12];
+        return in / total;
+    };
+
+    float second = -2.0f;
+    best.score = -2.0f;
+    for (int mode = 0; mode < 2; ++mode)
+        for (int root = 0; root < 12; ++root)
+        {
+            const float c = corr (mode == 0 ? major : minor, root) - (1.0f - fit (mode == 1, root));
+            if (c > best.score) { second = best.score; best = { root, mode == 1, c, 0.0f, true }; }
+            else if (c > second) second = c;
+        }
+    best.margin = best.score - second;
+    return best;
+}
+
+// Acordes que acompañan a la nota cantada, por debajo de ella (la melodía queda arriba).
+// Con escala: acorde de la propia escala (diatónico). Sin escala: tríada mayor.
+enum ChordType { NoChord = 0, Triad, Seventh, Fifth, Octave };
+
+inline int chordTones (int note, ChordType type, int root, const int* steps, int count, int out[4])
+{
+    if (type == NoChord) return 0;
+    if (type == Octave) { out[0] = note - 12; return 1; }
+    if (type == Fifth)  { out[0] = note - 12; out[1] = note - 5; return 2; }
+
+    int offsets[3] = { 4, 7, 11 };  // mayor con 7ª mayor, si la nota no está en la escala
+    const int rel = ((note - root) % 12 + 12) % 12;
+    int degree = -1;
+    for (int i = 0; i < count; ++i) if (steps[i] == rel) degree = i;
+    if (degree >= 0 && count >= 5)
+        for (int k = 0; k < 3; ++k)
+        {
+            const int d = degree + 2 * (k + 1);  // apilar terceras: grados +2, +4, +6
+            offsets[k] = steps[d % count] - steps[degree] + 12 * (d / count);
+        }
+
+    const int numUpper = type == Seventh ? 3 : 2;
+    int n = 0;
+    out[n++] = note - 12;                        // fundamental, una octava por debajo
+    for (int k = 0; k < numUpper; ++k)
+    {
+        int t = note - 12 + offsets[k];
+        while (t >= note) t -= 12;               // siempre por debajo de la melodía
+        out[n++] = t;
+    }
+    return n;
+}
+
+// Cuantización con fuerza: 1 = a la rejilla exacta, 0.5 = a medio camino (suena más humano).
+// legato = cada nota se alarga hasta la siguiente si el hueco es menor de un tiempo.
+inline void quantizeNotes (std::vector<TakeNote>& notes, double grid, double strength, bool legato, double beat)
+{
+    if (grid > 0.0 && strength > 0.0)
+        for (auto& n : notes)
+        {
+            const double len = n.end - n.start;
+            const double qs = std::round (n.start / grid) * grid;
+            const double qe = std::round (n.end / grid) * grid;
+            n.start += (qs - n.start) * strength;
+            n.end   += (qe - n.end) * strength;
+            const double minLen = grid * strength + len * (1.0 - strength);  // ni más corta que una casilla
+            if (n.end - n.start < minLen) n.end = n.start + minLen;
+        }
+    if (legato)
+        for (size_t i = 0; i + 1 < notes.size(); ++i)
+            if (notes[i + 1].start - notes[i].end < beat)
+                notes[i].end = notes[i + 1].start;
+}
+
+// Monofónico: ninguna nota puede pisar a la siguiente. Si dos caen en el mismo sitio al
+// cuantizar, se queda la segunda.
+inline void makeMonophonic (std::vector<TakeNote>& notes)
+{
+    std::vector<TakeNote> clean;
+    for (size_t i = 0; i < notes.size(); ++i)
+    {
+        auto n = notes[i];
+        if (i + 1 < notes.size())
+        {
+            if (notes[i + 1].start <= n.start) continue;
+            n.end = std::min (n.end, notes[i + 1].start);
+        }
+        if (n.end > n.start) clean.push_back (n);
+    }
+    notes.swap (clean);
+}
+
 // ---------------------------------------------------------------- Synth interno
-// Monofónico y simple: seno + un poco de tercer armónico, con envolvente suave para no
-// hacer clics. Solo sirve para que oigas lo que se detecta sin enrutar MIDI en FL.
-class MonoSynth
+// Polifónico (8 voces) para poder oír los acordes y escuchar las tomas. Cada voz lleva una
+// etiqueta: 0 = lo que cantas en vivo, 1 = reproducción de una toma. El pitch bend solo
+// afecta a las voces en vivo.
+class PolySynth
 {
 public:
     void prepare (double sampleRate)
     {
         sr = sampleRate;
         attackCoeff  = 1.0 - std::exp (-1.0 / (0.005 * sr));  // 5 ms
-        releaseCoeff = 1.0 - std::exp (-1.0 / (0.080 * sr));  // 80 ms
-        env = phase = 0.0;
-        gate = false;
+        releaseCoeff = 1.0 - std::exp (-1.0 / (0.120 * sr));  // 120 ms
+        for (auto& v : voices) v = {};
+        bendRatio = 1.0;
     }
 
-    void noteOn (int note) { freq = 440.0 * std::pow (2.0, (note - 69) / 12.0); gate = true; }
-    void noteOff()         { gate = false; }
-
-    float next()
+    void noteOn (int note, int tag, float velocity = 1.0f)
     {
-        env += ((gate ? 1.0 : 0.0) - env) * (gate ? attackCoeff : releaseCoeff);
-        phase += freq / sr;
-        if (phase >= 1.0) phase -= 1.0;
+        Voice* target = nullptr;
+        for (auto& v : voices) if (v.gate && v.note == note && v.tag == tag) target = &v;  // misma nota: reutilizar
+        if (! target) for (auto& v : voices) if (! v.gate && v.env < 1e-4) { target = &v; break; }
+        if (! target)  // todas ocupadas: la más silenciosa
+        {
+            target = &voices[0];
+            for (auto& v : voices) if (v.env < target->env) target = &v;
+        }
+        target->note = note;
+        target->tag = tag;
+        target->gate = true;
+        target->gain = 0.35f + 0.65f * velocity;
+        target->freq = 440.0 * std::pow (2.0, (note - 69) / 12.0);
+    }
+
+    void noteOff (int note, int tag)
+    {
+        for (auto& v : voices) if (v.gate && v.note == note && v.tag == tag) v.gate = false;
+    }
+
+    void allOff (int tag)
+    {
+        for (auto& v : voices) if (v.tag == tag) v.gate = false;
+    }
+
+    void setBend (float semitones) { bendRatio = std::pow (2.0, semitones / 12.0); }
+
+    // gains[tag]: volumen de las voces en vivo y de las de reproducción
+    float next (float liveGain, float previewGain)
+    {
         constexpr double twoPi = 6.283185307179586;
-        const double s = std::sin (twoPi * phase) + 0.25 * std::sin (3.0 * twoPi * phase);
-        return (float) (0.5 * s * env);
+        double out = 0.0;
+        for (auto& v : voices)
+        {
+            if (! v.gate && v.env < 1e-5) continue;
+            v.env += ((v.gate ? 1.0 : 0.0) - v.env) * (v.gate ? attackCoeff : releaseCoeff);
+            v.phase += v.freq * (v.tag == 0 ? bendRatio : 1.0) / sr;
+            if (v.phase >= 1.0) v.phase -= 1.0;
+            const double s = std::sin (twoPi * v.phase) + 0.22 * std::sin (2.0 * twoPi * v.phase)
+                           + 0.12 * std::sin (3.0 * twoPi * v.phase);
+            out += s * v.env * v.gain * (v.tag == 0 ? liveGain : previewGain);
+        }
+        return (float) (0.45 * std::tanh (out));  // tanh: varias voces a la vez no saturan
     }
 
 private:
-    double sr = 44100.0, freq = 440.0, phase = 0.0, env = 0.0;
-    double attackCoeff = 0.0, releaseCoeff = 0.0;
-    bool gate = false;
+    struct Voice { int note = -1, tag = 0; bool gate = false; float gain = 1.0f; double freq = 440.0, phase = 0.0, env = 0.0; };
+    std::array<Voice, 8> voices {};
+    double sr = 44100.0, attackCoeff = 0.0, releaseCoeff = 0.0, bendRatio = 1.0;
 };
 
 } // namespace hum

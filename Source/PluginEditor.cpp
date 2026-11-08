@@ -11,6 +11,7 @@ namespace
 
     int pc (int n) { return ((n % 12) + 12) % 12; }
     juce::String noteName (int n) { return juce::String (kNames[pc (n)]) + juce::String (n / 12); }  // como FL: C5 = 60
+    const char* kNamesEs[] = { "Do", "Do#", "Re", "Re#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si" };
 
     float textWidth (const juce::Font& f, const juce::String& s) { return juce::GlyphArrangement::getStringWidth (f, s); }
 }
@@ -67,12 +68,24 @@ void PitchRoll::paint (juce::Graphics& g)
         else if (pc (n) == 5) { g.setColour (col::line.withAlpha (0.45f)); g.fillRect (grid.getX(), y1 - 1.0f, grid.getWidth(), 1.0f); }
     }
 
-    // ---- Marcas de tiempo (una por segundo) que se desplazan con la historia
+    // ---- Marcas de tiempo: tiempos y compases de FL si está sonando; si no, una por segundo
     const float px = grid.getWidth() / (float) (kFrames - 1);
     const auto xOf = [&] (int age) { return grid.getRight() - (float) age * px; };
-    g.setColour (col::line.withAlpha (0.5f));
-    for (int age = (int) (total % 125); age < kFrames; age += 125)
-        g.fillRect (xOf (age), grid.getY(), 1.0f, grid.getHeight());
+    bool hasBeats = false;
+    for (int age = 0; age < count; ++age)
+    {
+        const auto beat = at (age).beat;
+        if (beat == 0) continue;
+        hasBeats = true;
+        g.setColour (beat == 2 ? col::faint : col::line.withAlpha (0.6f));
+        g.fillRect (xOf (age), grid.getY(), beat == 2 ? 1.5f : 1.0f, grid.getHeight());
+    }
+    if (! hasBeats)
+    {
+        g.setColour (col::line.withAlpha (0.5f));
+        for (int age = (int) (total % 125); age < kFrames; age += 125)
+            g.fillRect (xOf (age), grid.getY(), 1.0f, grid.getHeight());
+    }
 
     // ---- Teclado
     const juce::Colour ivory (0xffb8bfcb), ebony (0xff252a33);
@@ -245,12 +258,13 @@ void Readout::paint (juce::Graphics& g)
     g.fillRect (gx - 1.0f, bar.getY() - 4.0f, 2.0f, bar.getHeight() + 8.0f);
 }
 
+
 // ================================================================ RecButton
 void RecButton::paintButton (juce::Graphics& g, bool over, bool)
 {
-    const auto r = getLocalBounds().toFloat().reduced (0.5f);
+    const auto r = getLocalBounds().toFloat().reduced (0.75f);
     const float rad = r.getHeight() * 0.5f;
-    if (recording)
+    if (mode == Recording)
     {
         g.setColour (col::rec);
         g.fillRoundedRectangle (r, rad);
@@ -259,77 +273,201 @@ void RecButton::paintButton (juce::Graphics& g, bool over, bool)
     {
         g.setColour (over ? col::raised.brighter (0.06f) : col::raised);
         g.fillRoundedRectangle (r, rad);
-        g.setColour (col::line);
-        g.drawRoundedRectangle (r, rad, 1.0f);
+        g.setColour (mode == Armed ? col::rec.withAlpha (0.4f + 0.6f * blink) : col::line);
+        g.drawRoundedRectangle (r, rad, mode == Armed ? 1.5f : 1.0f);
     }
 
     const float cy = r.getCentreY(), ix = r.getX() + 18.0f;
-    if (recording)
+    if (mode == Recording)
     {
         g.setColour (juce::Colours::white);
         g.fillRoundedRectangle (ix - 4.5f, cy - 4.5f, 9.0f, 9.0f, 1.5f);
     }
     else
     {
-        g.setColour (col::rec);
+        g.setColour (col::rec.withAlpha (mode == Armed ? 0.35f + 0.65f * blink : 1.0f));
         g.fillEllipse (ix - 5.0f, cy - 5.0f, 10.0f, 10.0f);
     }
-    g.setColour (recording ? juce::Colours::white : col::text);
+
+    juce::String label = "Grabar";
+    if (mode == Armed) label = "Esperando Play";
+    if (mode == Recording) label = "Parar  " + juce::String (liveNotes);
+    g.setColour (mode == Recording ? juce::Colours::white : col::text);
     g.setFont (lnf.strong (15.0f));
-    g.drawText (recording ? "Parar" : "Grabar", r.withTrimmedLeft (32.0f).withTrimmedRight (12.0f), juce::Justification::centredLeft);
+    g.drawText (label, r.withTrimmedLeft (32.0f).withTrimmedRight (10.0f), juce::Justification::centredLeft);
 }
 
-// ================================================================ TakeChip
-void TakeChip::paint (juce::Graphics& g)
+// ================================================================ TakeCard
+TakeCard::TakeCard (HumLookAndFeel& l, HumAudioProcessor& p, int takeIndex)
+    : index (takeIndex), lnf (l), proc (p)
 {
-    const auto r = getLocalBounds().toFloat().reduced (0.5f);
-    g.setColour (col::raised);
-    g.fillRoundedRectangle (r, 6.0f);
-    g.setColour (ready() && isMouseOver() ? col::faint : col::line);
-    g.drawRoundedRectangle (r, 6.0f, 1.0f);
+    refresh();
+}
 
-    auto inner = getLocalBounds().toFloat().reduced (12.0f, 0.0f);
-    g.setFont (lnf.font (14.5f));
-    if (recording)
+void TakeCard::refresh()
+{
+    info = proc.getTakeInfo (index);
+    repaint();
+}
+
+juce::Rectangle<float> TakeCard::playArea() const   { return { 12.0f, (float) getHeight() * 0.5f - 16.0f, 32.0f, 32.0f }; }
+juce::Rectangle<float> TakeCard::deleteArea() const { return { (float) getWidth() - 28.0f, 8.0f, 20.0f, 20.0f }; }
+
+void TakeCard::paint (juce::Graphics& g)
+{
+    const auto r = getLocalBounds().toFloat().reduced (1.0f);
+    const bool selected = proc.selectedTake == index;
+    const bool playing = proc.getPreviewTake() == index;
+
+    g.setColour (hover ? col::raised.brighter (0.04f) : col::raised);
+    g.fillRoundedRectangle (r, 7.0f);
+    g.setColour (selected ? col::note : (hover ? col::faint : col::line));
+    g.drawRoundedRectangle (r, 7.0f, selected ? 1.5f : 1.0f);
+
+    // Escuchar / parar (con anillo de progreso mientras suena)
+    const auto pa = playArea();
+    g.setColour (overPlay ? col::line.brighter (0.25f) : col::line);
+    g.fillEllipse (pa);
+    if (playing)
     {
-        g.setColour (col::rec);
-        g.fillEllipse (inner.getX(), inner.getCentreY() - 3.5f, 7.0f, 7.0f);
+        juce::Path ring;
+        ring.addCentredArc (pa.getCentreX(), pa.getCentreY(), 15.0f, 15.0f, 0.0f, 0.0f,
+                            juce::MathConstants<float>::twoPi * juce::jlimit (0.0f, 1.0f, proc.previewProgress.load()), true);
+        g.setColour (col::note);
+        g.strokePath (ring, juce::PathStrokeType (2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
         g.setColour (col::text);
-        g.drawText (juce::String (notes) + (notes == 1 ? " nota grabada" : " notas grabadas"),
-                    inner.withTrimmedLeft (16.0f), juce::Justification::centredLeft);
-    }
-    else if (ready())
-    {
-        g.setColour (col::dim);  // asa de arrastre: 2 columnas x 3 puntos
-        for (int cx = 0; cx < 2; ++cx)
-            for (int cy = -1; cy <= 1; ++cy)
-                g.fillEllipse (inner.getX() + cx * 5.0f, inner.getCentreY() + cy * 5.0f - 1.25f, 2.5f, 2.5f);
-        g.setColour (col::text);
-        g.drawText ("Arrastrar toma", inner.withTrimmedLeft (18.0f), juce::Justification::centredLeft);
-        g.setColour (col::dim);
-        g.drawText (juce::String (notes) + (notes == 1 ? " nota" : " notas"), inner, juce::Justification::centredRight);
+        g.fillRoundedRectangle (pa.withSizeKeepingCentre (9.0f, 9.0f), 1.5f);
     }
     else
     {
-        g.setColour (col::faint);
-        g.drawText ("Graba una toma para arrastrarla", inner, juce::Justification::centredLeft);
+        juce::Path tri;
+        const auto c = pa.getCentre();
+        tri.addTriangle (c.x - 3.5f, c.y - 6.0f, c.x - 3.5f, c.y + 6.0f, c.x + 6.5f, c.y);
+        g.setColour (col::text);
+        g.fillPath (tri);
+    }
+
+    // Nombre y datos
+    const float tx = 56.0f;
+    g.setColour (col::text);
+    g.setFont (lnf.strong (15.0f));
+    g.drawText (info.name, juce::Rectangle<float> (tx, 9.0f, (float) getWidth() - tx - 34.0f, 20.0f), juce::Justification::centredLeft);
+    const int secs = juce::roundToInt (info.seconds);
+    juce::String meta = juce::String (info.notes) + (info.notes == 1 ? " nota, " : " notas, ")
+                      + juce::String (secs / 60) + ":" + juce::String (secs % 60).paddedLeft ('0', 2);
+    if (info.bar > 0) meta << u8 (", compás ") << info.bar;
+    g.setColour (col::dim);
+    g.setFont (lnf.font (13.0f));
+    g.drawText (meta, juce::Rectangle<float> (tx, 28.0f, (float) getWidth() - tx - 12.0f, 18.0f), juce::Justification::centredLeft);
+
+    // Miniatura: la melodía como en el piano roll
+    const auto thumb = juce::Rectangle<float> (tx, 50.0f, (float) getWidth() - tx - 12.0f, (float) getHeight() - 60.0f);
+    g.setColour (col::panel);
+    g.fillRoundedRectangle (thumb, 3.0f);
+    if (! info.preview.empty())
+    {
+        double t0 = info.preview.front().start, t1 = t0;
+        int lo = 127, hi = 0;
+        for (const auto& n : info.preview) { t1 = std::max (t1, n.end); lo = std::min (lo, n.note); hi = std::max (hi, n.note); }
+        lo -= 1; hi += 1;
+        const float rowH = thumb.getHeight() / (float) (hi - lo + 1);
+        const auto inner = thumb.reduced (4.0f, 0.0f);
+        const auto xOf = [&] (double t) { return inner.getX() + (float) ((t - t0) / std::max (1.0, t1 - t0)) * inner.getWidth(); };
+        g.setColour (selected ? col::note : col::note.withAlpha (0.75f));
+        for (const auto& n : info.preview)
+        {
+            const float y = thumb.getBottom() - (float) (n.note - lo + 1) * rowH;
+            const float h = juce::jlimit (3.0f, 6.0f, rowH - 1.0f);
+            g.fillRoundedRectangle (xOf (n.start), y + (rowH - h) * 0.5f, std::max (3.0f, xOf (n.end) - xOf (n.start) - 1.5f), h, 1.5f);
+        }
+        if (playing)
+        {
+            g.setColour (col::trace);
+            g.fillRect (inner.getX() + inner.getWidth() * proc.previewProgress.load(), thumb.getY(), 1.5f, thumb.getHeight());
+        }
+    }
+
+    // Borrar (solo al pasar el ratón)
+    if (hover)
+    {
+        const auto da = deleteArea().reduced (5.0f);
+        g.setColour (overDelete ? col::rec : col::dim);
+        g.drawLine (da.getX(), da.getY(), da.getRight(), da.getBottom(), 1.6f);
+        g.drawLine (da.getRight(), da.getY(), da.getX(), da.getBottom(), 1.6f);
     }
 }
 
-void TakeChip::mouseDrag (const juce::MouseEvent& e)
+void TakeCard::mouseMove (const juce::MouseEvent& e)
 {
-    if (dragging || ! ready() || e.getDistanceFromDragStart() < 4 || ! createFile)
-        return;
+    const auto p = e.position;
+    const bool np = playArea().contains (p), nd = deleteArea().contains (p);
+    if (! hover || np != overPlay || nd != overDelete)
+    {
+        hover = true; overPlay = np; overDelete = nd;
+        setMouseCursor (np || nd ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::DraggingHandCursor);
+        repaint();
+    }
+}
 
-    const auto file = createFile();
+void TakeCard::mouseExit (const juce::MouseEvent&) { hover = overPlay = overDelete = false; repaint(); }
+void TakeCard::mouseDown (const juce::MouseEvent&) { dragStarted = false; }
+
+void TakeCard::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragging || dragStarted || overPlay || overDelete || e.getDistanceFromDragStart() < 5)
+        return;
+    const auto file = proc.writeTakeFile (index);
     if (! file.existsAsFile())
         return;
 
     // Arrastre "externo": el sistema operativo lleva el archivo fuera del plugin y FL lo
     // recibe igual que si lo arrastrases desde el explorador de Windows.
-    dragging = true;
+    dragging = dragStarted = true;
     juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, this,
                                                                 [this] { dragging = false; });
+}
+
+void TakeCard::mouseUp (const juce::MouseEvent& e)
+{
+    if (dragStarted) return;
+    if (playArea().contains (e.position))
+        proc.playTake (index);
+    else if (deleteArea().contains (e.position) && hover)
+        proc.deleteTake (index);
+    else
+        proc.selectedTake = index;
+    if (onChanged) onChanged();
+}
+
+// ================================================================ TakesList
+void TakesList::rebuild (int viewportWidth)
+{
+    cards.clear();
+    const int n = proc.getNumTakes();
+    int y = 0;
+    for (int i = n - 1; i >= 0; --i)  // la más nueva arriba
+    {
+        auto card = std::make_unique<TakeCard> (lnf, proc, i);
+        card->onChanged = [this] { if (onChanged) onChanged(); };
+        card->setBounds (0, y, viewportWidth, 92);
+        addAndMakeVisible (*card);
+        cards.push_back (std::move (card));
+        y += 100;
+    }
+    setSize (viewportWidth, juce::jmax (y, getParentHeight()));
+    repaint();
+}
+
+void TakesList::refreshAll()     { for (auto& c : cards) c->refresh(); }
+void TakesList::repaintPlaying() { for (auto& c : cards) if (proc.getPreviewTake() == c->index) c->repaint(); }
+
+void TakesList::paint (juce::Graphics& g)
+{
+    if (! cards.empty()) return;
+    g.setColour (col::dim);
+    g.setFont (lnf.font (14.5f));
+    g.drawFittedText (u8 ("Pulsa Grabar y canta.\nCada toma aparece aquí: escúchala\ny arrástrala al piano roll de FL."),
+                      getLocalBounds().reduced (12), juce::Justification::centred, 4);
 }
 
 // ================================================================ Editor
@@ -343,38 +481,76 @@ HumAudioProcessorEditor::HumAudioProcessorEditor (HumAudioProcessor& p)
 
     recButton.onClick = [this]
     {
-        if (proc.isRecording()) proc.stopRecording();
-        else                    proc.startRecording();
+        if (proc.isRecording() || proc.isArmed()) proc.stopRecording();
+        else                                      proc.startRecording();
     };
     addAndMakeVisible (recButton);
+    setupToggle (syncToggle, "Grabar al dar Play", "syncPlay");
+    syncToggle.setTooltip (u8 ("La grabación empieza al dar Play en FL y para al pararlo. La toma queda alineada al compás."));
 
-    takeChip.createFile = [this] { return proc.writeTakeToMidiFile (quantizeToggle.getToggleState()); };
-    addAndMakeVisible (takeChip);
-
-    quantizeToggle.setButtonText ("Cuantizar 1/16");
-    quantizeToggle.setToggleState (true, juce::dontSendNotification);
-    addAndMakeVisible (quantizeToggle);
-
+    // Detección
     setupKnob (gateKnob, gateLabel, "Puerta", "gate", false);
-    setupKnob (octaveKnob, octaveLabel, "Octava", "octave", true);
     setupKnob (detailKnob, detailLabel, "Detalle", "detail", false);
     detailKnob.setTooltip (u8 ("Al 100 % capta adornos y temblores; más bajo se queda con la melodía principal"));
-    setupKnob (volKnob, volLabel, "Volumen", "synthVol", false);
+    setupKnob (octaveKnob, octaveLabel, "Octava", "octave", true);
+    calibrateButton.setButtonText ("Calibrar puerta");
+    calibrateButton.setTooltip (u8 ("Quédate en silencio 1,5 s: la puerta se ajusta justo por encima del ruido de tu sala"));
+    calibrateButton.onClick = [this] { startCalibration(); };
+    addAndMakeVisible (calibrateButton);
+
+    // Tonalidad
     setupCombo (rootBox, rootLabel, u8 ("Tónica"), "root");
     setupCombo (scaleBox, scaleLabel, "Escala", "scale");
-
-    autoTuneToggle.setButtonText (u8 ("Afinación auto"));
-    autoTuneAtt = std::make_unique<ButtonAtt> (proc.apvts, "autotune", autoTuneToggle);
-    addAndMakeVisible (autoTuneToggle);
+    detectButton.setButtonText ("Detectar tonalidad");
+    detectButton.setTooltip (u8 ("Mira qué notas has cantado (la toma seleccionada, o lo último que has cantado) y elige la tonalidad que mejor encaja"));
+    detectButton.onClick = [this] { detectKey(); };
+    addAndMakeVisible (detectButton);
+    keyResult.setFont (lnf.font (13.5f));
+    keyResult.setColour (juce::Label::textColourId, col::dim);
+    keyResult.setBorderSize ({});
+    addAndMakeVisible (keyResult);
+    setupToggle (autoTuneToggle, u8 ("Afinación auto"), "autotune");
+    autoTuneToggle.setTooltip (u8 ("Aprende si cantas un poco alto o bajo y lo compensa"));
     tuneLabel.setColour (juce::Label::textColourId, col::dim);
-    tuneLabel.setFont (lnf.font (14.0f));
+    tuneLabel.setFont (lnf.font (13.5f));
     addAndMakeVisible (tuneLabel);
 
-    synthToggle.setButtonText (u8 ("Oír synth"));
-    synthAtt = std::make_unique<ButtonAtt> (proc.apvts, "synth", synthToggle);
-    addAndMakeVisible (synthToggle);
+    // Armonía y expresión
+    setupCombo (chordsBox, chordsLabel, "Acordes", "chords");
+    chordsBox.setTooltip (u8 ("Añade acordes de la escala debajo de cada nota, en vivo y al exportar"));
+    setupToggle (bendToggle, "Pitch bend", "bend");
+    bendToggle.setTooltip (u8 ("La rueda de pitch bend sigue tu voz: deslizamientos y vibrato llegan al instrumento"));
+    setupCombo (bendRangeBox, bendRangeLabel, "rango del bend", "bendRange");
+    bendRangeBox.setTooltip (u8 ("Pon el mismo rango que tenga el instrumento de FL (casi siempre ±2)"));
+    setupToggle (velFixedToggle, "Velocity fija", "velFixed");
+    velFixedToggle.setTooltip (u8 ("Todas las notas con la misma fuerza en vez de según tu volumen"));
 
-    setSize (880, 464);
+    // Monitor
+    setupToggle (synthToggle, u8 ("Oír synth"), "synth");
+    setupKnob (volKnob, volLabel, "Volumen", "synthVol", false);
+    setupKnob (voiceKnob, voiceLabel, "Tu voz", "voiceMix", false);
+    voiceKnob.setTooltip (u8 ("Mezcla tu voz con el synth para oírte mientras cantas (usa auriculares)"));
+
+    // Tomas y exportación
+    takesList.onChanged = [this] { seenTakesVersion = -1; };
+    takesViewport.setViewedComponent (&takesList, false);
+    takesViewport.setScrollBarsShown (true, false);
+    takesViewport.setScrollBarThickness (8);
+    addAndMakeVisible (takesViewport);
+    setupCombo (gridBox, gridLabel, "Rejilla", "grid");
+    gridBox.setTooltip (u8 ("A qué figura se ajustan las notas al arrastrar o guardar"));
+    setupKnob (strengthKnob, strengthLabel, "Fuerza", "strength", false);
+    strengthKnob.setTooltip (u8 ("100 %: notas exactas en la rejilla. Menos: se acercan sin perder tu toque humano"));
+    setupToggle (legatoToggle, "Legato", "legato");
+    legatoToggle.setTooltip (u8 ("Cada nota dura hasta la siguiente (sin huecos pequeños)"));
+    saveButton.setButtonText ("Guardar .mid");
+    saveButton.onClick = [this] { saveSelectedTake(); };
+    addAndMakeVisible (saveButton);
+
+    for (const auto* id : { "grid", "strength", "legato", "detail" })
+        proc.apvts.addParameterListener (id, this);
+
+    setSize (1240, 576);
     timerCallback();
     startTimerHz (60);
 }
@@ -382,6 +558,8 @@ HumAudioProcessorEditor::HumAudioProcessorEditor (HumAudioProcessor& p)
 HumAudioProcessorEditor::~HumAudioProcessorEditor()
 {
     stopTimer();
+    for (const auto* id : { "grid", "strength", "legato", "detail" })
+        proc.apvts.removeParameterListener (id, this);
     setLookAndFeel (nullptr);
 }
 
@@ -394,13 +572,9 @@ void HumAudioProcessorEditor::setupKnob (juce::Slider& s, juce::Label& l, const 
     s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 84, 20);
     s.getProperties().set ("bipolar", bipolar);
 
-    auto att = std::make_unique<SliderAtt> (proc.apvts, paramId, s);
+    sliderAtts.push_back (std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (proc.apvts, paramId, s));
     if (auto* param = proc.apvts.getParameter (paramId))  // doble clic = valor por defecto
         s.setDoubleClickReturnValue (true, param->convertFrom0to1 (param->getDefaultValue()));
-    if (paramId == "gate") gateAtt = std::move (att);
-    else if (paramId == "octave") octaveAtt = std::move (att);
-    else if (paramId == "detail") detailAtt = std::move (att);
-    else volAtt = std::move (att);
 
     l.setText (name, juce::dontSendNotification);
     l.setFont (lnf.font (13.5f));
@@ -415,8 +589,7 @@ void HumAudioProcessorEditor::setupCombo (juce::ComboBox& c, juce::Label& l, con
     if (auto* param = dynamic_cast<juce::AudioParameterChoice*> (proc.apvts.getParameter (paramId)))
         c.addItemList (param->choices, 1);
     addAndMakeVisible (c);
-    if (paramId == "root") rootAtt = std::make_unique<ComboAtt> (proc.apvts, paramId, c);
-    else                   scaleAtt = std::make_unique<ComboAtt> (proc.apvts, paramId, c);
+    comboAtts.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (proc.apvts, paramId, c));
 
     l.setText (name, juce::dontSendNotification);
     l.setFont (lnf.font (13.5f));
@@ -425,8 +598,69 @@ void HumAudioProcessorEditor::setupCombo (juce::ComboBox& c, juce::Label& l, con
     addAndMakeVisible (l);
 }
 
+void HumAudioProcessorEditor::setupToggle (juce::ToggleButton& b, const juce::String& text, const juce::String& paramId)
+{
+    b.setButtonText (text);
+    addAndMakeVisible (b);
+    buttonAtts.push_back (std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (proc.apvts, paramId, b));
+}
+
+void HumAudioProcessorEditor::setParam (const juce::String& id, float value)
+{
+    if (auto* param = proc.apvts.getParameter (id))
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 (value));
+        param->endChangeGesture();
+    }
+}
+
+void HumAudioProcessorEditor::startCalibration()
+{
+    calibrating = true;
+    calibrationSamples.clear();
+    calibrationStart = juce::Time::getMillisecondCounterHiRes() * 0.001;
+}
+
+void HumAudioProcessorEditor::detectKey()
+{
+    const int numTakes = proc.getNumTakes();
+    const int index = numTakes > 0 ? proc.selectedTake : -1;
+    const auto key = proc.detectKey (index);
+    keyMessageUntil = juce::Time::getMillisecondCounterHiRes() * 0.001 + 12.0;
+    if (! key.valid)
+    {
+        keyResult.setText (u8 ("Canta algunas notas más y vuelve a probar"), juce::dontSendNotification);
+        return;
+    }
+    setParam ("root", (float) key.root);
+    setParam ("scale", key.minor ? 2.0f : 1.0f);  // índices de Mayor / Menor en kScales
+    juce::String text = juce::String (kNamesEs[key.root]) + (key.minor ? " menor" : " mayor")
+                      + " (" + kNames[key.root] + (key.minor ? "m" : "") + ")";
+    if (key.margin < 0.05f) text << ", dudosa";
+    keyResult.setText (text, juce::dontSendNotification);
+}
+
+void HumAudioProcessorEditor::saveSelectedTake()
+{
+    const int index = proc.selectedTake;
+    const auto info = proc.getTakeInfo (index);
+    if (info.notes == 0) return;
+    chooser = std::make_unique<juce::FileChooser> ("Guardar toma como MIDI",
+        juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("hum2midi " + info.name + ".mid"), "*.mid");
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [this, index] (const juce::FileChooser& fc)
+                          {
+                              const auto f = fc.getResult();
+                              if (f != juce::File()) proc.saveTakeTo (index, f.withFileExtension ("mid"));
+                          });
+}
+
 void HumAudioProcessorEditor::timerCallback()
 {
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
     // Pitch roll: lo que el hilo de audio ha analizado desde la última vez.
     const int n = proc.popPitchFrames (scratch.data(), (int) scratch.size());
     roll.append (scratch.data(), n);
@@ -450,21 +684,57 @@ void HumAudioProcessorEditor::timerCallback()
     const int cents = juce::roundToInt (proc.tuneCents.load());
     juce::String tuneText;
     if (autoTuneToggle.getToggleState())
-        tuneText = std::abs (cents) < 5 ? u8 ("cantas afinado")
-                                        : u8 ("cantas ") + juce::String (std::abs (cents)) + u8 (" ¢ ") + (cents < 0 ? "bajo" : "alto");
+        tuneText = std::abs (cents) < 5 ? u8 ("afinado") : juce::String (std::abs (cents)) + u8 (" ¢ ") + (cents < 0 ? "bajo" : "alto");
     tuneLabel.setText (tuneText, juce::dontSendNotification);
+    if (keyMessageUntil > 0.0 && now > keyMessageUntil) { keyResult.setText ({}, juce::dontSendNotification); keyMessageUntil = 0.0; }
+
+    // Calibración de la puerta
+    if (calibrating)
+    {
+        calibrationSamples.push_back (proc.inputLevelDb.load());
+        const double elapsed = now - calibrationStart;
+        if (elapsed >= 1.5 && ! calibrationSamples.empty())
+        {
+            calibrating = false;
+            std::sort (calibrationSamples.begin(), calibrationSamples.end());
+            const float noise = calibrationSamples[(size_t) ((double) calibrationSamples.size() * 0.9)];
+            const float gate = juce::jlimit (-70.0f, -15.0f, noise + 8.0f);  // 8 dB por encima del ruido
+            setParam ("gate", gate);
+            calibrateButton.setButtonText ("Puerta en " + juce::String (juce::roundToInt (gate)) + " dB");
+            calibrationMessageUntil = now + 2.5;
+        }
+        else
+            calibrateButton.setButtonText (u8 ("Silencio… ") + juce::String (juce::jmax (0.0, 1.5 - elapsed), 1) + " s");
+    }
+    else if (calibrationMessageUntil > 0.0 && now > calibrationMessageUntil)
+    {
+        calibrateButton.setButtonText ("Calibrar puerta");
+        calibrationMessageUntil = 0.0;
+    }
 
     // Grabación
-    const bool recording = proc.isRecording();
-    const int notes = proc.getRecordedNoteCount();
-    if (recButton.recording != recording) { recButton.recording = recording; recButton.repaint(); }
-    if (takeChip.recording != recording || takeChip.notes != notes)
+    const auto mode = proc.isRecording() ? RecButton::Recording : (proc.isArmed() ? RecButton::Armed : RecButton::Ready);
+    const float blink = 0.5f + 0.5f * std::sin ((float) now * 6.0f);
+    if (recButton.mode != mode || recButton.liveNotes != proc.getLiveNoteCount() || mode == RecButton::Armed)
     {
-        takeChip.recording = recording;
-        takeChip.notes = notes;
-        takeChip.setMouseCursor (takeChip.ready() ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
-        takeChip.repaint();
+        recButton.mode = mode;
+        recButton.liveNotes = proc.getLiveNoteCount();
+        recButton.blink = blink;
+        recButton.repaint();
     }
+
+    // Tomas
+    if (proc.takesVersion.load() != seenTakesVersion)
+    {
+        seenTakesVersion = proc.takesVersion.load();
+        takesList.rebuild (takesViewport.getWidth() - takesViewport.getScrollBarThickness() - 4);
+        repaint (takesArea);
+    }
+    else if (exportSettingsChanged)
+        takesList.refreshAll();
+    exportSettingsChanged = false;
+    takesList.repaintPlaying();
+    saveButton.setEnabled (proc.getNumTakes() > 0);
 }
 
 void HumAudioProcessorEditor::paint (juce::Graphics& g)
@@ -484,7 +754,6 @@ void HumAudioProcessorEditor::paint (juce::Graphics& g)
     g.strokePath (wave, juce::PathStrokeType (1.7f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     g.setColour (col::note);
     g.fillRoundedRectangle (mx + 15.0f, my - 3.0f, 10.0f, 6.0f, 2.0f);
-
     g.setColour (col::text);
     g.setFont (lnf.strong (20.0f));
     g.drawText ("hum2midi", juce::Rectangle<float> (mx + 30.0f, 12.0f, 140.0f, 32.0f), juce::Justification::centredLeft);
@@ -499,7 +768,32 @@ void HumAudioProcessorEditor::paint (juce::Graphics& g)
 
     // ---- Separadores entre grupos de controles
     for (int x : dividers)
-        g.fillRect ((float) x, (float) controlsArea.getY() + 14.0f, 1.0f, (float) controlsArea.getHeight() - 28.0f);
+        g.fillRect ((float) x, (float) controlsArea.getY() + 12.0f, 1.0f, (float) controlsArea.getHeight() - 24.0f);
+
+    // ---- Panel de tomas
+    const auto t = takesArea.toFloat();
+    g.setColour (col::panel);
+    g.fillRoundedRectangle (t, 8.0f);
+    g.setColour (col::line);
+    g.drawRoundedRectangle (t.reduced (0.5f), 8.0f, 1.0f);
+    g.setColour (col::text);
+    g.setFont (lnf.strong (16.0f));
+    g.drawText ("Tomas", juce::Rectangle<float> (t.getX() + 16.0f, t.getY() + 10.0f, 120.0f, 24.0f), juce::Justification::centredLeft);
+    const int numTakes = proc.getNumTakes();
+    if (numTakes > 0)
+    {
+        g.setColour (col::dim);
+        g.setFont (lnf.font (13.5f));
+        g.drawText (juce::String (numTakes) + " de 12", juce::Rectangle<float> (t.getRight() - 136.0f, t.getY() + 10.0f, 120.0f, 24.0f),
+                    juce::Justification::centredRight);
+    }
+    const float exportTop = t.getBottom() - 186.0f;
+    g.setColour (col::line);
+    g.fillRect (t.getX() + 1.0f, exportTop, t.getWidth() - 2.0f, 1.0f);
+    g.setColour (col::dim);
+    g.setFont (lnf.font (13.5f));
+    g.drawText ("Al arrastrar o guardar", juce::Rectangle<float> (t.getX() + 16.0f, exportTop + 10.0f, 200.0f, 18.0f),
+                juce::Justification::centredLeft);
 }
 
 void HumAudioProcessorEditor::placeKnob (juce::Slider& s, juce::Label& l, juce::Rectangle<int> area)
@@ -510,42 +804,68 @@ void HumAudioProcessorEditor::placeKnob (juce::Slider& s, juce::Label& l, juce::
 
 void HumAudioProcessorEditor::resized()
 {
-    const int W = getWidth();
+    const int W = getWidth(), H = getHeight();
 
     // Cabecera
-    recButton.setBounds (W - 20 - 108, 12, 108, 32);
-    takeChip.setBounds (recButton.getX() - 10 - 230, 12, 230, 32);
-    quantizeToggle.setBounds (takeChip.getX() - 20 - 146, 12, 146, 32);
+    recButton.setBounds (16 + 896 - 160, 11, 160, 34);
+    syncToggle.setBounds (recButton.getX() - 20 - 190, 11, 190, 34);
 
     // Pantalla: lectura | pitch roll
-    screenArea = { 16, 56, W - 32, 256 };
+    screenArea = { 16, 58, 896, 268 };
     auto s = screenArea.reduced (1);
     readout.setBounds (s.removeFromLeft (184));
     s.removeFromLeft (1);
     roll.setBounds (s);
 
-    // Controles: detección | tonalidad | monitor
-    controlsArea = { 16, 322, W - 32, getHeight() - 322 - 8 };
+    // Controles: detección | tonalidad | armonía | monitor
+    controlsArea = { 16, 340, 896, H - 340 - 14 };
     dividers.clear();
-    auto c = controlsArea;
+    const int x = controlsArea.getX(), y = controlsArea.getY();
 
-    auto detect = c.removeFromLeft (276);
-    placeKnob (gateKnob, gateLabel, detect.removeFromLeft (92));
-    placeKnob (detailKnob, detailLabel, detect.removeFromLeft (92));
-    placeKnob (octaveKnob, octaveLabel, detect);
-    dividers.push_back (c.getX() + 16);
-    c.removeFromLeft (32);
+    // Detección
+    placeKnob (gateKnob, gateLabel, { x, y, 90, 120 });
+    placeKnob (detailKnob, detailLabel, { x + 90, y, 90, 120 });
+    placeKnob (octaveKnob, octaveLabel, { x + 180, y, 90, 120 });
+    calibrateButton.setBounds (x + 10, y + 146, 250, 34);
+    dividers.push_back (x + 279);
 
-    auto key = c.removeFromLeft (300);
-    rootLabel.setBounds (key.getX(), key.getY() + 10, 92, 18);
-    rootBox.setBounds (key.getX(), key.getY() + 32, 92, 34);
-    scaleLabel.setBounds (key.getX() + 104, key.getY() + 10, 180, 18);
-    scaleBox.setBounds (key.getX() + 104, key.getY() + 32, 180, 34);
-    autoTuneToggle.setBounds (key.getX(), key.getY() + 84, 146, 28);
-    tuneLabel.setBounds (key.getX() + 146, key.getY() + 84, 150, 28);
-    dividers.push_back (c.getX() + 16);
-    c.removeFromLeft (32);
+    // Tonalidad
+    const int x2 = x + 288;
+    rootLabel.setBounds (x2, y + 10, 80, 18);
+    rootBox.setBounds (x2, y + 32, 80, 34);
+    scaleLabel.setBounds (x2 + 92, y + 10, 160, 18);
+    scaleBox.setBounds (x2 + 92, y + 32, 160, 34);
+    detectButton.setBounds (x2, y + 78, 252, 34);
+    keyResult.setBounds (x2, y + 116, 252, 20);
+    autoTuneToggle.setBounds (x2, y + 146, 146, 34);
+    tuneLabel.setBounds (x2 + 146, y + 146, 106, 34);
+    dividers.push_back (x2 + 261);
 
-    synthToggle.setBounds (c.getX(), c.getY() + 58, 112, 28);
-    placeKnob (volKnob, volLabel, c.withTrimmedLeft (116));
+    // Armonía y expresión
+    const int x3 = x2 + 270;
+    chordsLabel.setBounds (x3, y + 10, 170, 18);
+    chordsBox.setBounds (x3, y + 32, 170, 34);
+    bendToggle.setBounds (x3, y + 78, 170, 34);
+    bendRangeBox.setBounds (x3, y + 114, 84, 30);
+    bendRangeLabel.setBounds (x3 + 92, y + 114, 80, 30);
+    velFixedToggle.setBounds (x3, y + 150, 170, 34);
+    dividers.push_back (x3 + 179);
+
+    // Monitor
+    const int x4 = x3 + 188, w4 = controlsArea.getRight() - x4;
+    synthToggle.setBounds (x4, y + 6, w4, 34);
+    placeKnob (volKnob, volLabel, { x4, y + 46, w4 / 2, 120 });
+    placeKnob (voiceKnob, voiceLabel, { x4 + w4 / 2, y + 46, w4 - w4 / 2, 120 });
+
+    // Panel de tomas
+    takesArea = { 928, 58, W - 928 - 16, H - 58 - 14 };
+    const auto t = takesArea;
+    const int exportTop = t.getBottom() - 186;
+    takesViewport.setBounds (t.getX() + 10, t.getY() + 44, t.getWidth() - 20, exportTop - (t.getY() + 44) - 10);
+    gridLabel.setBounds (t.getX() + 16, exportTop + 38, 150, 18);
+    gridBox.setBounds (t.getX() + 16, exportTop + 60, 160, 34);
+    placeKnob (strengthKnob, strengthLabel, { t.getRight() - 106, exportTop + 22, 90, 120 });
+    legatoToggle.setBounds (t.getX() + 16, exportTop + 102, 160, 30);
+    saveButton.setBounds (t.getX() + 16, exportTop + 140, t.getWidth() - 32, 34);
+    seenTakesVersion = -1;  // recolocar las tarjetas con el nuevo ancho
 }

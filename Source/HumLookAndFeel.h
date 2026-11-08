@@ -50,6 +50,10 @@ public:
         setColour (juce::TooltipWindow::backgroundColourId, col::raised);
         setColour (juce::TooltipWindow::textColourId, col::text);
         setColour (juce::TooltipWindow::outlineColourId, col::line);
+        setColour (juce::TextButton::textColourOffId, col::text);
+        setColour (juce::TextButton::textColourOnId, col::text);
+        setColour (juce::ScrollBar::thumbColourId, col::faint);
+        setColour (juce::ScrollBar::trackColourId, juce::Colours::transparentBlack);
     }
 
     juce::Font font (float h) const    { return juce::Font (juce::FontOptions().withTypeface (medium).withHeight (h)); }
@@ -136,6 +140,25 @@ public:
         chevron.lineTo (cx + 4.0f, cy - 2.0f);
         g.setColour (col::dim);
         g.strokePath (chevron, juce::PathStrokeType (1.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+
+    // ---- Botones de texto planos
+    void drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour&, bool over, bool down) override
+    {
+        const auto r = b.getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (down ? col::line : (over ? col::raised.brighter (0.06f) : col::raised));
+        g.fillRoundedRectangle (r, 6.0f);
+        g.setColour (over ? col::faint : col::line);
+        g.drawRoundedRectangle (r, 6.0f, 1.0f);
+    }
+
+    juce::Font getTextButtonFont (juce::TextButton&, int) override { return strong (14.5f); }
+
+    void drawButtonText (juce::Graphics& g, juce::TextButton& b, bool, bool) override
+    {
+        g.setFont (getTextButtonFont (b, b.getHeight()));
+        g.setColour (b.isEnabled() ? col::text : col::faint);
+        g.drawFittedText (b.getButtonText(), b.getLocalBounds().reduced (8, 0), juce::Justification::centred, 1);
     }
 
     juce::Font getComboBoxFont (juce::ComboBox&) override { return font (15.0f); }

@@ -5,6 +5,7 @@
 #include "HumLookAndFeel.h"
 
 // ---- Pitch roll: tu voz (línea) y las notas detectadas (bloques) sobre un mini piano roll.
+//      Con FL en marcha dibuja los tiempos y compases.
 class PitchRoll : public juce::Component
 {
 public:
@@ -43,40 +44,67 @@ private:
     ui::HumLookAndFeel& lnf;
 };
 
-// ---- Botón de grabar
+// ---- Botón de grabar: Grabar / Esperando Play / Parar
 class RecButton : public juce::Button
 {
 public:
     explicit RecButton (ui::HumLookAndFeel& l) : juce::Button ("rec"), lnf (l) {}
-    bool recording = false;
+    enum Mode { Ready, Armed, Recording };
+    Mode mode = Ready;
+    int liveNotes = 0;
+    float blink = 0.0f;  // 0..1, para el parpadeo del modo armado
     void paintButton (juce::Graphics&, bool over, bool down) override;
 
 private:
     ui::HumLookAndFeel& lnf;
 };
 
-// ---- Ficha de la toma: se arrastra directamente al piano roll de FL.
-class TakeChip : public juce::Component
+// ---- Una toma en la lista: escuchar, ver, arrastrar al piano roll, borrar.
+class TakeCard : public juce::Component
 {
 public:
-    explicit TakeChip (ui::HumLookAndFeel& l) : lnf (l) {}
-    std::function<juce::File()> createFile;
-    bool recording = false;
-    int notes = 0;
+    TakeCard (ui::HumLookAndFeel& l, HumAudioProcessor& p, int takeIndex);
+    void refresh();  // vuelve a pedir los datos (p. ej. si cambia la cuantización)
     void paint (juce::Graphics&) override;
-    void mouseEnter (const juce::MouseEvent&) override { repaint(); }
-    void mouseExit (const juce::MouseEvent&) override  { repaint(); }
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
+    void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
-    void mouseUp (const juce::MouseEvent&) override { dragging = false; }
-    bool ready() const { return ! recording && notes > 0; }
+    void mouseUp (const juce::MouseEvent&) override;
+
+    int index;
+    std::function<void()> onChanged;  // la lista se refresca (selección, borrado)
+
+private:
+    juce::Rectangle<float> playArea() const;
+    juce::Rectangle<float> deleteArea() const;
+
+    ui::HumLookAndFeel& lnf;
+    HumAudioProcessor& proc;
+    HumAudioProcessor::TakeInfo info;
+    bool hover = false, overPlay = false, overDelete = false, dragging = false, dragStarted = false;
+};
+
+// ---- Lista de tomas (la más nueva arriba)
+class TakesList : public juce::Component
+{
+public:
+    TakesList (ui::HumLookAndFeel& l, HumAudioProcessor& p) : lnf (l), proc (p) {}
+    void rebuild (int viewportWidth);
+    void refreshAll();
+    void repaintPlaying();
+    void paint (juce::Graphics&) override;
+    std::function<void()> onChanged;
 
 private:
     ui::HumLookAndFeel& lnf;
-    bool dragging = false;
+    HumAudioProcessor& proc;
+    std::vector<std::unique_ptr<TakeCard>> cards;
 };
 
 class HumAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                private juce::Timer
+                                private juce::Timer,
+                                private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     explicit HumAudioProcessorEditor (HumAudioProcessor&);
@@ -87,38 +115,75 @@ public:
 
 private:
     void timerCallback() override;
+    void parameterChanged (const juce::String&, float) override { exportSettingsChanged = true; }
     void setupKnob (juce::Slider&, juce::Label&, const juce::String& name, const juce::String& paramId, bool bipolar);
     void setupCombo (juce::ComboBox&, juce::Label&, const juce::String& name, const juce::String& paramId);
+    void setupToggle (juce::ToggleButton&, const juce::String& text, const juce::String& paramId);
     void placeKnob (juce::Slider&, juce::Label&, juce::Rectangle<int> area);
+    void startCalibration();
+    void detectKey();
+    void saveSelectedTake();
+    void setParam (const juce::String& id, float value);
 
     HumAudioProcessor& proc;
     ui::HumLookAndFeel lnf;
 
-    juce::Rectangle<int> screenArea, controlsArea;
+    juce::Rectangle<int> screenArea, controlsArea, takesArea;
     std::vector<int> dividers;  // x de los separadores entre grupos de controles
 
     PitchRoll roll { lnf };
     Readout readout { lnf };
     RecButton recButton { lnf };
-    TakeChip takeChip { lnf };
-    juce::ToggleButton quantizeToggle, autoTuneToggle, synthToggle;
-    juce::Label tuneLabel;
-    juce::TooltipWindow tooltips { this, 700 };  // explica los controles al pasar el ratón
+    juce::ToggleButton syncToggle;
 
-    juce::Slider gateKnob, octaveKnob, detailKnob, volKnob;
-    juce::Label gateLabel, octaveLabel, detailLabel, volLabel, rootLabel, scaleLabel;
+    // Detección
+    juce::Slider gateKnob, detailKnob, octaveKnob;
+    juce::Label gateLabel, detailLabel, octaveLabel;
+    juce::TextButton calibrateButton;
+
+    // Tonalidad
     juce::ComboBox rootBox, scaleBox;
+    juce::Label rootLabel, scaleLabel, keyResult, tuneLabel;
+    juce::TextButton detectButton;
+    juce::ToggleButton autoTuneToggle;
+
+    // Armonía y expresión
+    juce::ComboBox chordsBox, bendRangeBox;
+    juce::Label chordsLabel, bendRangeLabel;
+    juce::ToggleButton bendToggle, velFixedToggle;
+
+    // Monitor
+    juce::ToggleButton synthToggle;
+    juce::Slider volKnob, voiceKnob;
+    juce::Label volLabel, voiceLabel;
+
+    // Tomas y exportación
+    TakesList takesList { lnf, proc };
+    juce::Viewport takesViewport;
+    juce::ComboBox gridBox;
+    juce::Label gridLabel, strengthLabel;
+    juce::Slider strengthKnob;
+    juce::ToggleButton legatoToggle;
+    juce::TextButton saveButton;
+    std::unique_ptr<juce::FileChooser> chooser;
+
+    juce::TooltipWindow tooltips { this, 700 };  // explica los controles al pasar el ratón
 
     // Las "attachments" enlazan cada control con su parámetro: mueves el control y cambia el
     // parámetro; FL automatiza el parámetro y se mueve el control.
-    using SliderAtt = juce::AudioProcessorValueTreeState::SliderAttachment;
-    using ComboAtt  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
-    using ButtonAtt = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    std::unique_ptr<SliderAtt> gateAtt, octaveAtt, detailAtt, volAtt;
-    std::unique_ptr<ComboAtt>  rootAtt, scaleAtt;
-    std::unique_ptr<ButtonAtt> synthAtt, autoTuneAtt;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>> sliderAtts;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>> comboAtts;
+    std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> buttonAtts;
 
     std::vector<HumAudioProcessor::PitchFrame> scratch = std::vector<HumAudioProcessor::PitchFrame> (2048);
+    int seenTakesVersion = -1;
+    std::atomic<bool> exportSettingsChanged { false };  // lo marcan los parámetros (puede ser desde el audio)
+
+    // Calibración de la puerta: escucha el silencio de la sala 1.5 s
+    bool calibrating = false;
+    double calibrationStart = 0.0, calibrationMessageUntil = 0.0;
+    std::vector<float> calibrationSamples;
+    double keyMessageUntil = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HumAudioProcessorEditor)
 };
